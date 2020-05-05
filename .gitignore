@@ -1,0 +1,12 @@
+target/
+
+## VS Code
+.history
+
+## Metals
+.bloop
+.metals
+project/metals.sbt
+
+## OS
+.DS_Store
