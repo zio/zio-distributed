@@ -1,5 +1,29 @@
 package zio.distributed 
 
+/**
+ * This modules regroups all the key concepts representing the model of ZIO-Distributed.
+ * 
+ * There are four key concepts:
+ * - schemas
+ * - structures 
+ * - namespaces
+ * - transactions 
+ *
+ * A schema represents how data is organized. Think about it like a database schema. Concretely,
+ * it is modeled using Records and Maps of Records. A schema on its own is simply a description of the
+ * data, not the data itself. 
+ * 
+ * A structure is the named association of a schema and a namespace (more on this later). It is the concrete
+ * instantiation of a schema, just like an SQL table in regards of its schema.
+ * 
+ * A transaction is a set of operation which must be atomically done. These operations are performed on data
+ * defined by the schemas in a defined namespace.
+ * 
+ * Finally, a namespace represents a well defined and isolated space where transactions can be performed.
+ * 
+ * TODO: Define the relationship between structures and transactions.
+ * 
+ **/
 trait DistributedModule {
   trait IO[+E, +A]
 
