@@ -78,28 +78,33 @@ trait DistributedModule {
       type Append[That <: RecordSchema] <: RecordSchema
       type Fields[-Source]
 
-      def :*:[That <: RecordSchema](that: That): Append[That]
+      def :*:[A <: Schema](head: FieldSchema[A]): RecordSchema
+      def ++[That <: RecordSchema](that: That): Append[That]
     }
     object RecordSchema {
-      type Empty                  = Empty.type
-      type Singleton[A <: Schema] = Cons[A, Empty]
+      type Empty                               = Empty.type
+      type :*:[A <: Schema, B <: RecordSchema] = Cons[A, B]
+      type Singleton[A <: Schema]              = Cons[A, Empty]
 
       case object Empty extends RecordSchema {
         type Repr                         = Unit
         type Fields[-_]                   = Unit
         type Append[That <: RecordSchema] = That
 
-        def :*:[That <: RecordSchema](that: That): Append[That] = that
+        def :*:[A <: Schema](head: FieldSchema[A]): Cons[A, Empty] = Cons(head, Empty)
+        def ++[That <: RecordSchema](that: That): Append[That]     = that
       }
 
       sealed case class Cons[A <: Schema, B <: RecordSchema](field: FieldSchema[A], tail: B) extends RecordSchema {
+        self =>
         type Repr                         = (field.schema.Repr, tail.Repr)
         type Fields[-Source]              = (DTransaction[Nothing, Source, field.schema.Repr], tail.Fields[Source])
         type Append[That <: RecordSchema] = Cons[A, tail.Append[That]]
 
-        def fields: Fields[Cons[A, B]] = ???
+        def fields: Fields[Repr] = (???, ???)
 
-        def :*:[C <: RecordSchema](that: C): Append[C] = Cons(field, that :*: tail)
+        def :*:[C <: Schema](head: FieldSchema[C]): Cons[C, Cons[A, B]] = Cons(head, self)
+        def ++[That <: RecordSchema](that: That): Append[That]          = Cons(field, tail ++ that)
       }
     }
 
@@ -198,13 +203,13 @@ trait DistributedModule {
 
     import Schema._
 
-    val productValue   = string("name") :*: int("origin")
+    val productValue   = string("name") ++ int("origin")
     val productId      = string
     val productCatalog = map(productId, productValue)
 
     val name :*: origin :*: _ = productValue.fields
 
-    val jarId      = int("organization") :*: string("name") :*: string("version")
+    val jarId      = int("organization") ++ string("name") ++ string("version")
     val jarValue   = int("size")
     val jarCatalog = map(jarId, jarValue)
 
@@ -216,6 +221,6 @@ trait DistributedModule {
     // Use case: access the name belonging to product ID X
     import DTransaction._
 
-    val transaction = productCatalogStructure.access.get("X").some >>> name
+    val transaction = productCatalogStructure.access.get("ProductID_X").some >>> name
   }
 }
