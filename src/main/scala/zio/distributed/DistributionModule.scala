@@ -43,7 +43,10 @@ trait DistributedModule {
 
   sealed case class FieldSchema[S <: Schema](name: String, schema: S)
 
-  sealed trait Schema
+  sealed trait Schema {
+    type Repr
+  }
+
   object Schema {
 
     import RecordSchema._
@@ -64,14 +67,16 @@ trait DistributedModule {
 
     def prim[A: TypeTag]: PrimitiveSchema[A] = PrimitiveSchema(TypeTag[A])
 
-    sealed case class PrimitiveSchema[A](tag: TypeTag[A])                               extends Schema
-    sealed case class MapSchema[K <: Schema, V <: Schema](keySchema: K, valueSchema: V) extends Schema
+    sealed case class PrimitiveSchema[A](tag: TypeTag[A]) extends Schema {
+      type Repr = A
+    }
+    sealed case class MapSchema[K <: Schema, V <: Schema](keySchema: K, valueSchema: V) extends Schema {
+      type Repr = Map[keySchema.Repr, valueSchema.Repr]
+    }
 
     sealed trait RecordSchema extends Schema {
       type Append[That <: RecordSchema] <: RecordSchema
-      type Repr
-
-      def fields: Repr
+      type Fields[-Source]
 
       def :*:[That <: RecordSchema](that: That): Append[That]
     }
@@ -81,20 +86,20 @@ trait DistributedModule {
 
       case object Empty extends RecordSchema {
         type Repr                         = Unit
+        type Fields[-_]                   = Unit
         type Append[That <: RecordSchema] = That
-
-        def fields: Repr = ()
 
         def :*:[That <: RecordSchema](that: That): Append[That] = that
       }
 
       sealed case class Cons[A <: Schema, B <: RecordSchema](field: FieldSchema[A], tail: B) extends RecordSchema {
-        type Repr                         = (FieldSchema[A], tail.Repr)
+        type Repr                         = (field.schema.Repr, tail.Repr)
+        type Fields[-Source]              = (DTransaction[Nothing, Source, field.schema.Repr], tail.Fields[Source])
         type Append[That <: RecordSchema] = Cons[A, tail.Append[That]]
 
-        def fields: Repr = (field, tail.fields)
+        def fields: Fields[Cons[A, B]] = ???
 
-        def :*:[A <: RecordSchema](that: A): Append[A] = Cons(field, that :*: tail)
+        def :*:[C <: RecordSchema](that: C): Append[C] = Cons(field, that :*: tail)
       }
     }
 
@@ -108,16 +113,17 @@ trait DistributedModule {
   object DistributedError {}
 
   sealed trait Namespace { self =>
-    def name: String
+    val name: String
 
     type Tag
 
     def structure[A <: Schema](name0: String, schema0: A): Structure.Aux[A, Tag] =
       new Structure[A] {
-        def name   = name0
-        def schema = schema0
+        val name: String                    = name0
+        val schema: A                       = schema0
+        val namespace: Namespace.Aux[NSTag] = self
 
-        type Namespace = self.Tag
+        type NSTag = self.Tag
       }
   }
   object Namespace {
@@ -125,18 +131,21 @@ trait DistributedModule {
 
     def apply(name0: String): Namespace =
       new Namespace {
-        def name = name0
+        val name = name0
       }
   }
 
-  trait Structure[A <: Schema] {
-    def name: String
-    def schema: A
+  trait Structure[A <: Schema] { self =>
+    val name: String
+    val schema: A
 
-    type Namespace
+    type NSTag
+    val namespace: Namespace.Aux[NSTag]
+
+    def access: DTransaction[Nothing, NSTag, schema.Repr] = DTransaction.access[NSTag, A](self)
   }
   object Structure {
-    type Aux[A <: Schema, Namespace0] = Structure[A] { type Namespace = Namespace0 }
+    type Aux[A <: Schema, Namespace0] = Structure[A] { type NSTag = Namespace0 }
   }
 
   trait Cluster {
@@ -147,38 +156,66 @@ trait DistributedModule {
 
     def structures[A](namespace: Namespace.Aux[A]): IO[DistributedError, Set[Structure.Aux[Schema, A]]]
 
-    def commit[T, V](transaction: DTransaction[T, V]): IO[DistributedError, V]
+    def commit[T, E, V](transaction: DTransaction[T, E, V]): IO[Either[DistributedError, E], V]
 
     def namespaces: IO[DistributedError, Set[Namespace]]
   }
-  sealed trait DTransaction[-Source, +Value]
+  sealed trait DTransaction[+Error, -Source, +Value] { self =>
+    def >>>[Error1 >: Error, Out](other: DTransaction[Error1, Value, Out]): DTransaction[Error1, Source, Out] =
+      DTransaction.Compose(self, other)
+  }
   object DTransaction {
-    sealed case class Constant[A: TypeTag](value: A)              extends DTransaction[Any, A]
-    sealed case class GetMapValue[K: TypeTag, V: TypeTag](key: K) extends DTransaction[Map[K, V], V]
+    implicit class MapOps[Error, Source, K, V](dt: DTransaction[Error, Source, Map[K, V]]) {
+      def get(key: K): DTransaction[Error, Source, Option[V]] = dt >>> GetMapValue(key)
+    }
+
+    implicit class OptionOps[Source, A](dt: DTransaction[Nothing, Source, Option[A]]) {
+      def some: DTransaction[Unit, Source, A] = dt >>> ExtractSome[A]()
+    }
+
+    sealed case class Constant[A: TypeTag](value: A) extends DTransaction[Nothing, Any, A]
+
+    //Structure (belongs to the namespace) -> Schema Representation
+    sealed abstract case class AccessStructure[NSTag, S <: Schema, Repr] private[DTransaction] (
+      s: Structure.Aux[S, NSTag]
+    ) extends DTransaction[Nothing, NSTag, Repr]
+
+    sealed case class GetMapValue[K, V](key: K) extends DTransaction[Nothing, Map[K, V], Option[V]]
+
+    sealed case class ExtractSome[A]() extends DTransaction[Unit, Option[A], A]
+
+    case class Compose[Error, A, B, C](
+      l: DTransaction[Error, A, B],
+      r: DTransaction[Error, B, C]
+    ) extends DTransaction[Error, A, C]
+
+    // accessing a structure gets back a Scala representation of the Schema
+    def access[NSTag, S <: Schema](s: Structure.Aux[S, NSTag]): DTransaction[Nothing, NSTag, s.schema.Repr] =
+      new AccessStructure[NSTag, S, s.schema.Repr](s) {}
   }
 
   object Example {
 
     import Schema._
 
-    lazy val productValue   = string("name") :*: int("origin")
-    lazy val productId      = string
-    lazy val productCatalog = map(productId, productValue)
+    val productValue   = string("name") :*: int("origin")
+    val productId      = string
+    val productCatalog = map(productId, productValue)
 
     val name :*: origin :*: _ = productValue.fields
 
-    lazy val jarId      = int("organization") :*: string("name") :*: string("version")
-    lazy val jarValue   = int("size")
-    lazy val jarCatalog = map(jarId, jarValue)
+    val jarId      = int("organization") :*: string("name") :*: string("version")
+    val jarValue   = int("size")
+    val jarCatalog = map(jarId, jarValue)
 
     // lazy val cluster: Cluster = cluster
-    // lazy val schema: Schema = schema
-    // lazy val dev = Namespace("dev")
-    // // Map[UserId, UserProfile]
-    // lazy val users = dev.structure("users", schema)
+    val dev                     = Namespace("dev")
+    val productCatalogStructure = dev.structure("productCatalog", productCatalog)
+    val jarCatalogStructure     = dev.structure("jarCatalog", jarCatalog)
 
-    // lazy val txn: DTransaction[dev.Tag, Int] = txn
+    // Use case: access the name belonging to product ID X
+    import DTransaction._
 
-    // val result = cluster.commit(txn)
+    val transaction = productCatalogStructure.access.get("X").some >>> name
   }
 }
