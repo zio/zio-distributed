@@ -41,10 +41,10 @@ trait DistributedModule {
     implicit case object TBoolean extends TypeTag[Boolean]
   }
 
-  sealed case class FieldSchema[S <: Schema](name: String, schema: S)
+  sealed case class FieldSchema[+S <: Schema](name: String, schema: S)
 
   sealed trait Schema {
-    type Accessors[-Source]
+    type Accessors[Source]
   }
 
   object Schema {
@@ -89,7 +89,7 @@ trait DistributedModule {
       type Singleton[A <: Schema]              = Cons[A, Empty]
 
       case object Empty extends RecordSchema {
-        type Accessors[-_]                = Unit
+        type Accessors[_]                 = Unit
         type Append[That <: RecordSchema] = That
         
          def fields[Source]: Accessors[Source] = ()
@@ -100,7 +100,7 @@ trait DistributedModule {
 
       sealed case class Cons[A <: Schema, B <: RecordSchema](field: FieldSchema[A], tail: B) extends RecordSchema {
         self =>
-        type Accessors[-Source]           = (DTransaction[Nothing, Source, A], tail.Accessors[Source])
+        type Accessors[Source]           = (DTransaction[Nothing, Source, A], tail.Accessors[Source])
         type Append[That <: RecordSchema] = Cons[A, tail.Append[That]]
 
         def fields[Source]: Accessors[Source] = (DTransaction.AccessSourceField(field), tail.fields[Source])
@@ -148,9 +148,14 @@ trait DistributedModule {
 
     type StructureTag
     type NSTag
+
+    type Accessors = schema.Accessors[NSTag]
+
     val namespace: Namespace.Aux[NSTag]
 
-    def access: DTransaction[Nothing, StructureTag, schema.Repr] = DTransaction.access[NSTag, A](self)
+    // Why schema.Accessors[NSTag] instead of schema.Accessors[StructureTag]?
+    def access: DTransaction[Nothing, NSTag, schema.Accessors[NSTag]] = 
+      DTransaction.access[NSTag, A](self)
   }
   object Structure {
     type Aux[A <: Schema, Namespace0] = Structure[A] { type NSTag = Namespace0 }
@@ -194,7 +199,7 @@ trait DistributedModule {
 
     sealed case class ExtractSome[A]() extends DTransaction[Unit, Option[A], A]
 
-    sealed case class AccessSourceField[-Source, +Value](
+    sealed case class AccessSourceField[-Source, +Value <: Schema](
       field: FieldSchema[Value]
     ) extends DTransaction[Nothing, Source, Value]
 
@@ -204,8 +209,10 @@ trait DistributedModule {
     ) extends DTransaction[Error, A, C]
 
     // accessing a structure gets back a Scala representation of the Schema
-    def access[NSTag, S <: Schema](s: Structure.Aux[S, NSTag]): DTransaction[Nothing, NSTag, s.schema.Repr] =
-      new AccessStructure[NSTag, S, s.schema.Repr](s) {}
+    def access[NSTag, S <: Schema](
+      s: Structure.Aux[S, NSTag]
+    ): DTransaction[Nothing, NSTag, s.schema.Accessors[NSTag]] =
+      new AccessStructure[NSTag, S, s.schema.Accessors[NSTag]](s) {}
   }
 
   object Example {
@@ -217,23 +224,20 @@ trait DistributedModule {
     val productId      = string
     val productCatalog = map(productId, productValue)
 
-    val name :*: origin :*: _ = productValue.fields
-
+    
     val jarId      = int("organization") ++ string("name") ++ string("version")
     val jarValue   = int("size")
     val jarCatalog = map(jarId, jarValue)
-    val organization :*: _ :*: _ :*: _ = jarId.fields
-
+    
     // lazy val cluster: Cluster = cluster
     val dev                     = Namespace("dev")
     val productCatalogStructure = dev.structure("productCatalog", productCatalog)
+    val name :*: origin :*: _   = productValue.fields[productCatalogStructure.Accessors]
+    
     val jarCatalogStructure     = dev.structure("jarCatalog", jarCatalog)
+    val organization :*: name1 :*: _ :*: _ = jarId.fields[jarCatalogStructure.Accessors]
 
-    // Use case: access the name belonging to product ID X
-    //val t2 = DTransaction.AccessStructure2[]() 
-    //val x = productCatalogStructure.access.get("ProductID_X")
-    // We'd like to prevent the user from trying to access a column that is not defined by this 
-    // structure
-    val transaction = productCatalogStructure.access.get("ProductID_X").some >>> name
+    val transaction0 = productCatalogStructure.access.get("ProductID_X").some
+    val transaction1 = productCatalogStructure.access >>> name
   }
 }
