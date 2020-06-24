@@ -44,7 +44,7 @@ trait DistributedModule {
   sealed case class FieldSchema[S <: Schema](name: String, schema: S)
 
   sealed trait Schema {
-    type Repr
+    type Accessors[-Source]
   }
 
   object Schema {
@@ -68,41 +68,42 @@ trait DistributedModule {
     def prim[A: TypeTag]: PrimitiveSchema[A] = PrimitiveSchema(TypeTag[A])
 
     sealed case class PrimitiveSchema[A](tag: TypeTag[A]) extends Schema {
-      type Repr = A
+      type Accessors[_] = A
     }
     sealed case class MapSchema[K <: Schema, V <: Schema](keySchema: K, valueSchema: V) extends Schema {
-      type Repr = Map[keySchema.Repr, valueSchema.Repr]
+      type Accessors[Source] = Map[keySchema.Accessors[Source], valueSchema.Accessors[Source]]
     }
 
     sealed trait RecordSchema extends Schema { self =>
       type Append[That <: RecordSchema] <: RecordSchema
-      type Fields[-Source]
+
+      def fields[Source]: Accessors[Source]
 
       def :*:[A <: Schema](head: FieldSchema[A]): RecordSchema
       def ++[That <: RecordSchema](that: That): Append[That]
-
-      def fields[Source]: Fields[Repr]
     }
+
     object RecordSchema {
       type Empty                               = Empty.type
       type :*:[A <: Schema, B <: RecordSchema] = Cons[A, B]
       type Singleton[A <: Schema]              = Cons[A, Empty]
 
       case object Empty extends RecordSchema {
-        type Repr                         = Unit
-        type Fields[-_]                   = Unit
+        type Accessors[-_]                = Unit
         type Append[That <: RecordSchema] = That
+        
+         def fields[Source]: Accessors[Source] = ()
 
         def :*:[A <: Schema](head: FieldSchema[A]): Cons[A, Empty] = Cons(head, Empty)
         def ++[That <: RecordSchema](that: That): Append[That]     = that
-        def fields[Source]: Fields[Repr]                           = ()
       }
 
       sealed case class Cons[A <: Schema, B <: RecordSchema](field: FieldSchema[A], tail: B) extends RecordSchema {
         self =>
-        type Repr                         = (field.schema.Repr, tail.Repr)
-        type Fields[-Source]              = (DTransaction[Nothing, Source, field.schema.Repr], tail.Fields[Source])
+        type Accessors[-Source]           = (DTransaction[Nothing, Source, A], tail.Accessors[Source])
         type Append[That <: RecordSchema] = Cons[A, tail.Append[That]]
+
+        def fields[Source]: Accessors[Source] = (DTransaction.AccessSourceField(field), tail.fields[Source])
 
         def :*:[C <: Schema](head: FieldSchema[C]): Cons[C, Cons[A, B]] = Cons(head, self)
         def ++[That <: RecordSchema](that: That): Append[That]          = Cons(field, tail ++ that)
@@ -145,10 +146,11 @@ trait DistributedModule {
     val name: String
     val schema: A
 
+    type StructureTag
     type NSTag
     val namespace: Namespace.Aux[NSTag]
 
-    def access: DTransaction[Nothing, NSTag, schema.Repr] = DTransaction.access[NSTag, A](self)
+    def access: DTransaction[Nothing, StructureTag, schema.Repr] = DTransaction.access[NSTag, A](self)
   }
   object Structure {
     type Aux[A <: Schema, Namespace0] = Structure[A] { type NSTag = Namespace0 }
@@ -192,6 +194,10 @@ trait DistributedModule {
 
     sealed case class ExtractSome[A]() extends DTransaction[Unit, Option[A], A]
 
+    sealed case class AccessSourceField[-Source, +Value](
+      field: FieldSchema[Value]
+    ) extends DTransaction[Nothing, Source, Value]
+
     case class Compose[Error, A, B, C](
       l: DTransaction[Error, A, B],
       r: DTransaction[Error, B, C]
@@ -206,6 +212,7 @@ trait DistributedModule {
 
     import Schema._
 
+    // Definition of some schema
     val productValue   = string("name") ++ int("origin")
     val productId      = string
     val productCatalog = map(productId, productValue)
@@ -215,6 +222,7 @@ trait DistributedModule {
     val jarId      = int("organization") ++ string("name") ++ string("version")
     val jarValue   = int("size")
     val jarCatalog = map(jarId, jarValue)
+    val organization :*: _ :*: _ :*: _ = jarId.fields
 
     // lazy val cluster: Cluster = cluster
     val dev                     = Namespace("dev")
@@ -222,8 +230,10 @@ trait DistributedModule {
     val jarCatalogStructure     = dev.structure("jarCatalog", jarCatalog)
 
     // Use case: access the name belonging to product ID X
-    import DTransaction._
-
+    //val t2 = DTransaction.AccessStructure2[]() 
+    //val x = productCatalogStructure.access.get("ProductID_X")
+    // We'd like to prevent the user from trying to access a column that is not defined by this 
+    // structure
     val transaction = productCatalogStructure.access.get("ProductID_X").some >>> name
   }
 }
