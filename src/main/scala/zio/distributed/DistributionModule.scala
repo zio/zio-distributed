@@ -74,12 +74,14 @@ trait DistributedModule {
       type Repr = Map[keySchema.Repr, valueSchema.Repr]
     }
 
-    sealed trait RecordSchema extends Schema {
+    sealed trait RecordSchema extends Schema { self =>
       type Append[That <: RecordSchema] <: RecordSchema
       type Fields[-Source]
 
       def :*:[A <: Schema](head: FieldSchema[A]): RecordSchema
       def ++[That <: RecordSchema](that: That): Append[That]
+
+      def fields[Source]: Fields[Repr]
     }
     object RecordSchema {
       type Empty                               = Empty.type
@@ -93,6 +95,7 @@ trait DistributedModule {
 
         def :*:[A <: Schema](head: FieldSchema[A]): Cons[A, Empty] = Cons(head, Empty)
         def ++[That <: RecordSchema](that: That): Append[That]     = that
+        def fields[Source]: Fields[Repr]                           = ()
       }
 
       sealed case class Cons[A <: Schema, B <: RecordSchema](field: FieldSchema[A], tail: B) extends RecordSchema {
@@ -100,8 +103,6 @@ trait DistributedModule {
         type Repr                         = (field.schema.Repr, tail.Repr)
         type Fields[-Source]              = (DTransaction[Nothing, Source, field.schema.Repr], tail.Fields[Source])
         type Append[That <: RecordSchema] = Cons[A, tail.Append[That]]
-
-        def fields: Fields[Repr] = (???, ???)
 
         def :*:[C <: Schema](head: FieldSchema[C]): Cons[C, Cons[A, B]] = Cons(head, self)
         def ++[That <: RecordSchema](that: That): Append[That]          = Cons(field, tail ++ that)
@@ -177,6 +178,8 @@ trait DistributedModule {
     implicit class OptionOps[Source, A](dt: DTransaction[Nothing, Source, Option[A]]) {
       def some: DTransaction[Unit, Source, A] = dt >>> ExtractSome[A]()
     }
+
+    sealed case class ExtractField[-Source, +Value]() extends DTransaction[Nothing, Source, Value]
 
     sealed case class Constant[A: TypeTag](value: A) extends DTransaction[Nothing, Any, A]
 
