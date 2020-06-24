@@ -224,7 +224,6 @@ trait DistributedModule {
     val productId      = string
     val productCatalog = map(productId, productValue)
 
-    
     val jarId      = int("organization") ++ string("name") ++ string("version")
     val jarValue   = int("size")
     val jarCatalog = map(jarId, jarValue)
@@ -236,8 +235,10 @@ trait DistributedModule {
     
     val jarCatalogStructure     = dev.structure("jarCatalog", jarCatalog)
     val organization :*: name1 :*: _ :*: _ = jarId.fields[jarCatalogStructure.Accessors]
-
+    
     val transaction0 = productCatalogStructure.access.get("ProductID_X").some
+    // Should we restrict the columns passed to >>> and ensure they are part of the schema which was used to create
+    // the structure?
     val transaction1 = productCatalogStructure.access >>> name
   }
 }
